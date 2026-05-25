@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Capitalure Prime — CLI Launcher (bash)
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python "$DIR/main.py" "$@"
