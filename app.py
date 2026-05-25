@@ -15,6 +15,8 @@ from mt5_connector import DataConnector
 from regime_detector import RegimeDetector
 from calculators import PositionSizeCalculator, PnLCalculator
 from dotenv import dotenv_values
+from journal import TradeJournal
+from ai_coach import AICoach
 
 
 st.set_page_config(
@@ -466,6 +468,220 @@ def render_mtf_heatmap_tab():
             st.metric(f'{vol}', cnt, pct)
 
 
+@safe_render
+def render_journal_tab():
+    journal = TradeJournal()
+    st.markdown('## 📓 Trading Journal')
+
+    tab1, tab2, tab3 = st.tabs(['📝 Log Trade', '📋 Trade History', '📊 Stats'])
+
+    with tab1:
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            j_date = st.date_input('Date', value=datetime.now(), key='j_date')
+            j_symbol = st.text_input('Symbol', value='EURUSD', key='j_sym').upper()
+            j_dir = st.selectbox('Direction', ['long', 'short'], key='j_dir')
+            j_entry = st.number_input('Entry Price', value=1.1000, step=0.0001, format='%.5f', key='j_entry')
+            j_sl = st.number_input('Stop Loss (optional)', value=0.0, step=0.0001, format='%.5f', key='j_sl')
+            j_tp = st.number_input('Take Profit (optional)', value=0.0, step=0.0001, format='%.5f', key='j_tp')
+            j_size = st.number_input('Position Size (lots)', value=0.0, step=0.01, format='%.2f', key='j_size')
+        with col2:
+            j_exit = st.number_input('Exit Price (leave 0 if open)', value=0.0, step=0.0001, format='%.5f', key='j_exit')
+            j_strategy = st.text_input('Strategy', value='Manual', key='j_strat')
+            j_regime = st.selectbox('Regime at Entry', [
+                '', 'Bull Volatile', 'Bull Quiet', 'Bear Volatile', 'Bear Quiet',
+                'Sideways Volatile', 'Sideways Quiet'
+            ], key='j_regime')
+            j_session = st.selectbox('Trading Session', ['', 'asia', 'london', 'ny', 'overlap'], key='j_sess')
+            j_discipline = st.slider('Discipline Rating (1-10)', 1, 10, 5, key='j_disc')
+            j_emotion = st.text_input('Emotion (e.g. confident, anxious)', value='', key='j_emot')
+            j_tags = st.text_input('Tags (comma-separated)', value='', key='j_tags')
+            j_notes = st.text_area('Notes', value='', key='j_notes')
+            log_btn = st.button('📝 Log Trade', type='primary', use_container_width=True, key='j_log')
+
+        if log_btn:
+            sl_val = j_sl if j_sl != 0 else None
+            tp_val = j_tp if j_tp != 0 else None
+            exit_val = j_exit if j_exit != 0 else None
+            size_val = j_size if j_size != 0 else None
+            trade_id = journal.add_trade(
+                date=j_date.isoformat(), symbol=j_symbol, direction=j_dir,
+                entry_price=j_entry, exit_price=exit_val, stop_loss=sl_val,
+                take_profit=tp_val, position_size=size_val,
+                strategy=j_strategy, regime_at_entry=j_regime if j_regime else None,
+                notes=j_notes, tags=j_tags, discipline_rating=j_discipline,
+                emotion=j_emotion, session=j_session,
+            )
+            st.success(f'Trade #{trade_id} logged successfully!')
+
+    with tab2:
+        col_f1, col_f2 = st.columns([2, 1])
+        with col_f1:
+            f_sym = st.text_input('Filter by Symbol', value='', key='jf_sym').upper()
+            f_result = st.selectbox('Filter Result', ['all', 'win', 'loss', 'breakeven', 'open'], key='jf_res')
+            f_days = st.number_input('Days Back', value=0, step=30, key='jf_days')
+        with col_f2:
+            st.markdown('#### Quick Actions')
+            if st.button('🗑️ Delete Last Trade', type='secondary', key='j_del_last'):
+                trades = journal.get_trades(limit=1)
+                if not trades.empty:
+                    journal.delete_trade(int(trades.iloc[0]['id']))
+                    st.rerun()
+            if st.button('📤 Export to CSV', key='j_export'):
+                path = journal.export_csv('capitalure_trades_export.csv')
+                st.success(f'Exported to {path}')
+
+        trades_df = journal.get_trades(
+            symbol=f_sym if f_sym else None,
+            result_filter=f_result if f_result != 'all' else None,
+            days_back=f_days if f_days > 0 else None,
+            limit=500,
+        )
+        if not trades_df.empty:
+            display_cols = ['id', 'date', 'symbol', 'direction', 'entry_price', 'exit_price',
+                           'pips', 'pnl', 'r_multiple', 'result', 'strategy', 'discipline_rating']
+            display = trades_df[[c for c in display_cols if c in trades_df.columns]].copy()
+            display.columns = [c.replace('_', ' ').title() for c in display.columns]
+            st.dataframe(display, hide_index=True, use_container_width=True)
+
+            row = st.selectbox('Select Trade ID to Edit/Close', trades_df['id'].tolist(), key='j_edit_id')
+            trade = journal.get_trade(int(row))
+            if trade:
+                with st.expander(f'Edit Trade #{row}', expanded=False):
+                    if trade['result'] == 'open':
+                        close_price = st.number_input('Close Price', value=float(trade['entry_price'] or 0),
+                                                      format='%.5f', key='j_close_price')
+                        if st.button('✅ Close Trade', key='j_close_btn'):
+                            journal.close_trade(int(row), close_price)
+                            st.success(f'Trade #{row} closed!')
+                            st.rerun()
+                    new_notes = st.text_area('Notes', value=trade.get('notes', '') or '', key='j_edit_notes')
+                    new_tags = st.text_input('Tags', value=trade.get('tags', '') or '', key='j_edit_tags')
+                    new_disc = st.slider('Discipline', 1, 10, int(trade.get('discipline_rating', 5)), key='j_edit_disc')
+                    if st.button('💾 Update Trade', key='j_update_btn'):
+                        journal.update_trade(int(row), notes=new_notes, tags=new_tags, discipline_rating=new_disc)
+                        st.success(f'Trade #{row} updated!')
+                        st.rerun()
+        else:
+            st.info('No trades found matching your filters')
+
+    with tab3:
+        stats = journal.get_stats()
+        if stats.get('total_trades', 0) == 0:
+            st.info('Log some trades first to see statistics')
+        else:
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric('Total Trades', stats['total_trades'])
+            col_b.metric('Win Rate', f"{stats['win_rate']}%")
+            col_c.metric('Total P&L', f"${stats['total_pnl']:,.2f}")
+            col_d.metric('Profit Factor', stats['profit_factor'] if stats['profit_factor'] != float('inf') else '∞')
+            col_e, col_f, col_g, col_h = st.columns(4)
+            col_e.metric('Avg R Multiple', stats['avg_r'])
+            col_f.metric('Expectancy', f"${stats['expectancy']:,.2f}")
+            col_g.metric('Avg Discipline', f"{stats['avg_discipline']}/10")
+            col_h.metric('Best/Worst', f"${stats['best_trade']} / ${stats['worst_trade']}")
+            st.markdown(f"**{stats['wins']} wins** / **{stats['losses']} losses** — "
+                       f"Avg win: ${stats['avg_win']} | Avg loss: ${stats['avg_loss']}")
+
+
+@safe_render
+def render_ai_coach_tab():
+    journal = TradeJournal()
+    coach = AICoach(journal)
+    st.markdown('## 🤖 AI Coach')
+
+    days = st.slider('Analysis Lookback (days)', 7, 365, 90, key='coach_days')
+    analyze_btn = st.button('🔍 Run Full Analysis', type='primary', use_container_width=True, key='coach_btn')
+
+    if analyze_btn or 'coach_report' not in st.session_state:
+        with st.spinner('Analyzing your trading...'):
+            report = coach.full_report(days_back=days)
+            st.session_state.coach_report = report
+
+    report = st.session_state.get('coach_report')
+    if not report:
+        st.info('Click 🔍 Run Full Analysis to get your AI coaching report')
+        return
+
+    tabs = st.tabs(['🎯 Edge Analysis', '📋 Regime Compliance', '📊 Discipline', '🔍 Patterns', '💡 Recommendations'])
+
+    with tabs[0]:
+        edge = report.get('edge_analysis', {})
+        if edge.get('status') != 'ready':
+            st.warning(f'Need {edge.get("trades_needed", 3)} more closed trades for edge analysis')
+        else:
+            st.markdown(f'### Edge Rating: {edge.get("edge_rating", "N/A")}')
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric('Win Rate', f"{edge['win_rate']}%")
+            col_b.metric('Profit Factor', edge['profit_factor'] if edge['profit_factor'] != float('inf') else '∞')
+            col_c.metric('Expectancy', f"{edge['expectancy']}R")
+            col_d.metric('Sharpe', edge['sharpe'])
+            col_e, col_f, col_g, col_h = st.columns(4)
+            col_e.metric('Avg R Win', edge['avg_r_win'])
+            col_f.metric('Avg R Loss', edge['avg_r_loss'])
+            col_g.metric('Max DD', f"${edge['max_drawdown']:,.2f}")
+            col_h.metric('Consec Losses', edge['consecutive_losses'])
+            for v in edge.get('verdicts', []):
+                st.markdown(v)
+
+    with tabs[1]:
+        reg = report.get('regime_compliance', {})
+        if reg.get('status') != 'ready':
+            st.info('Log trades with regime data to see regime compliance analysis')
+        else:
+            st.markdown(f'### Best Regime: **{reg.get("best_regime", "N/A")}** ({reg["best_win_rate"]}% WR)')
+            st.markdown(f'Worst Regime: {reg.get("worst_regime", "N/A")}')
+            st.markdown(f'Compliance: {reg["compliance_pct"]}% of trades in best regime')
+            regime_data = reg.get('regime_stats', {})
+            if regime_data:
+                rows = []
+                for regime, s in regime_data.items():
+                    rows.append({'Regime': regime, 'Trades': s['trades'],
+                                'Win Rate': f"{s['win_rate']}%", 'Avg R': s['avg_r'],
+                                'P&L': f"${s['pnl']:,.2f}"})
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    with tabs[2]:
+        disc = report.get('discipline_score', {})
+        if disc.get('status') != 'ready':
+            st.info('Need more trades for discipline analysis')
+        else:
+            st.markdown(f'### Discipline Score: {disc["discipline_score"]}/10')
+            col_a, col_b = st.columns(2)
+            col_a.metric('Avg Self-Rating', f"{disc['avg_discipline']}/10")
+            col_b.metric('Premature Exits', disc['premature_exits'])
+            for v in disc.get('verdicts', []):
+                st.markdown(v)
+
+    with tabs[3]:
+        pat = report.get('pattern_mining', {})
+        if pat.get('status') != 'ready':
+            st.info('Need at least 5 trades for pattern mining')
+        else:
+            categories = pat.get('patterns', {})
+            for cat_name, stats in categories.items():
+                st.markdown(f'#### {cat_name.replace("_", " ").title()}')
+                rows = []
+                for name, s in stats.items():
+                    rows.append({'Category': name, 'Trades': s['trades'],
+                                'Win Rate': f"{s['win_rate']}%", 'P&L': f"${s['pnl']:,.2f}"})
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            if pat.get('best_pattern'):
+                st.success(f'⭐ **Best Pattern**: {pat["best_pattern"]}')
+            if pat.get('worst_pattern'):
+                st.warning(f'⚠️ **Worst Pattern**: {pat["worst_pattern"]}')
+
+    with tabs[4]:
+        recs = report.get('recommendations', [])
+        st.markdown('### 🎯 Personalized Recommendations')
+        for r in recs:
+            st.markdown(f'- {r}')
+        if st.button('🔄 Refresh Recommendations', key='coach_refresh'):
+            st.session_state.coach_report = coach.full_report(days_back=days)
+            st.rerun()
+
+
 def main():
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -481,7 +697,7 @@ def main():
 
     detector = RegimeDetector()
 
-    tab_names = ['🔍 Regime Detection', '🧮 Calculators', '📊 Dashboard', '🗺️ Regime Map']
+    tab_names = ['🔍 Regime Detection', '🧮 Calculators', '📊 Dashboard', '🗺️ Regime Map', '📓 Journal', '🤖 AI Coach']
     tabs = st.tabs(tab_names)
 
     with tabs[0]:
@@ -492,6 +708,10 @@ def main():
         render_dashboard_tab()
     with tabs[3]:
         render_mtf_heatmap_tab()
+    with tabs[4]:
+        render_journal_tab()
+    with tabs[5]:
+        render_ai_coach_tab()
 
     st.markdown("""
     <div style='text-align:center; padding:20px 0; color:#636e72; font-size:12px;'>
